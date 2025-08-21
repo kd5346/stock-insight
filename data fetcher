@@ -1,0 +1,191 @@
+import yfinance as yf
+import pandas as pd
+from typing import Optional, Dict, Any
+import streamlit as st
+
+class StockDataFetcher:
+    """
+    A class to handle fetching stock data from Yahoo Finance using yfinance library.
+    """
+    
+    def __init__(self, symbol: str):
+        """
+        Initialize the StockDataFetcher with a stock symbol.
+        
+        Args:
+            symbol (str): Stock ticker symbol (e.g., 'AAPL', 'GOOGL')
+        """
+        self.symbol = symbol.upper()
+        self.ticker = yf.Ticker(self.symbol)
+    
+    @st.cache_data(ttl=300)  # Cache for 5 minutes
+    def get_historical_data(self, period: str = "1y", interval: str = "1d") -> Optional[pd.DataFrame]:
+        """
+        Fetch historical stock data for the specified period and interval.
+        
+        Args:
+            period (str): Time period for data (1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max)
+            interval (str): Data interval (1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo)
+        
+        Returns:
+            pd.DataFrame: Historical stock data with OHLCV columns
+        """
+        try:
+            # Fetch historical data
+            hist_data = self.ticker.history(period=period, interval=interval)
+            
+            if hist_data.empty:
+                raise ValueError(f"No historical data found for symbol '{self.symbol}'")
+            
+            # Clean the data
+            hist_data = hist_data.dropna()
+            
+            # Round numerical columns to 2 decimal places
+            numerical_cols = ['Open', 'High', 'Low', 'Close', 'Adj Close']
+            for col in numerical_cols:
+                if col in hist_data.columns:
+                    hist_data[col] = hist_data[col].round(2)
+            
+            # Volume as integer
+            if 'Volume' in hist_data.columns:
+                hist_data['Volume'] = hist_data['Volume'].astype(int)
+            
+            return hist_data
+            
+        except Exception as e:
+            st.error(f"Error fetching historical data: {str(e)}")
+            return None
+    
+    @st.cache_data(ttl=300)  # Cache for 5 minutes
+    def get_stock_info(self) -> Dict[str, Any]:
+        """
+        Fetch general information about the stock/company.
+        
+        Returns:
+            Dict: Dictionary containing stock/company information
+        """
+        try:
+            info = self.ticker.info
+            
+            # If info is empty or doesn't contain basic data, try alternative approach
+            if not info or 'symbol' not in info:
+                # Try to get basic info from the ticker's fast_info
+                try:
+                    fast_info = self.ticker.fast_info
+                    if fast_info:
+                        info = {
+                            'symbol': self.symbol,
+                            'longName': self.symbol,
+                            'marketCap': getattr(fast_info, 'market_cap', None),
+                            'currency': getattr(fast_info, 'currency', 'USD'),
+                            'exchange': getattr(fast_info, 'exchange', 'Unknown'),
+                        }
+                except:
+                    # Fallback to minimal info
+                    info = {
+                        'symbol': self.symbol,
+                        'longName': self.symbol,
+                    }
+            
+            return info
+            
+        except Exception as e:
+            st.warning(f"Could not fetch complete stock info: {str(e)}")
+            # Return minimal info as fallback
+            return {
+                'symbol': self.symbol,
+                'longName': self.symbol,
+                'currency': 'USD',
+                'exchange': 'Unknown'
+            }
+    
+    def get_financial_metrics(self) -> Optional[Dict[str, float]]:
+        """
+        Calculate additional financial metrics from historical data.
+        
+        Returns:
+            Dict: Dictionary containing calculated financial metrics
+        """
+        try:
+            hist_data = self.get_historical_data(period="1y", interval="1d")
+            if hist_data is None or hist_data.empty:
+                return None
+            
+            # Calculate metrics
+            current_price = hist_data['Close'].iloc[-1]
+            price_52w_high = hist_data['High'].max()
+            price_52w_low = hist_data['Low'].min()
+            
+            # Volatility (standard deviation of daily returns)
+            daily_returns = hist_data['Close'].pct_change().dropna()
+            volatility = daily_returns.std() * (252 ** 0.5)  # Annualized volatility
+            
+            # Average volume
+            avg_volume = hist_data['Volume'].mean()
+            
+            # Price performance
+            start_price = hist_data['Close'].iloc[0]
+            ytd_return = ((current_price - start_price) / start_price) * 100
+            
+            metrics = {
+                'current_price': round(current_price, 2),
+                'price_52w_high': round(price_52w_high, 2),
+                'price_52w_low': round(price_52w_low, 2),
+                'volatility': round(volatility, 4),
+                'avg_volume': int(avg_volume),
+                'ytd_return_pct': round(ytd_return, 2)
+            }
+            
+            return metrics
+            
+        except Exception as e:
+            st.warning(f"Could not calculate financial metrics: {str(e)}")
+            return None
+    
+    def validate_symbol(self) -> bool:
+        """
+        Validate if the stock symbol exists and has data.
+        
+        Returns:
+            bool: True if symbol is valid, False otherwise
+        """
+        try:
+            # Try to fetch a small amount of recent data
+            test_data = self.ticker.history(period="5d", interval="1d")
+            return not test_data.empty
+        except:
+            return False
+    
+    def get_dividends(self, period: str = "1y") -> Optional[pd.DataFrame]:
+        """
+        Fetch dividend data for the stock.
+        
+        Args:
+            period (str): Time period for dividend data
+        
+        Returns:
+            pd.DataFrame: Dividend data
+        """
+        try:
+            dividends = self.ticker.dividends
+            
+            if dividends.empty:
+                return None
+            
+            # Filter by period if needed
+            if period != "max":
+                # Convert period to days for filtering
+                period_days = {
+                    "1mo": 30, "3mo": 90, "6mo": 180, 
+                    "1y": 365, "2y": 730, "5y": 1825
+                }
+                
+                if period in period_days:
+                    cutoff_date = pd.Timestamp.now() - pd.Timedelta(days=period_days[period])
+                    dividends = dividends[dividends.index >= cutoff_date]
+            
+            return dividends.to_frame('Dividend') if not dividends.empty else None
+            
+        except Exception as e:
+            st.warning(f"Could not fetch dividend data: {str(e)}")
+            return None
